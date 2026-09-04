@@ -60,6 +60,8 @@ module Assistant
         Function::GetAccounts,
         Function::GetHoldings,
         Function::GetLiabilities,
+        Function::ProjectCashBalance,
+        Function::SimulateScenarios,
         Function::GetBalanceSheet,
         Function::GetIncomeStatement,
         Function::GetBudget,
