@@ -59,6 +59,7 @@ module Assistant
         Function::GetRecurringTransactions,
         Function::GetAccounts,
         Function::GetHoldings,
+        Function::GetLiabilities,
         Function::GetBalanceSheet,
         Function::GetIncomeStatement,
         Function::GetBudget,

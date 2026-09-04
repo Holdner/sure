@@ -135,4 +135,40 @@ class Assistant::Function::GetAccountsTest < ActiveSupport::TestCase
     assert_not terms.key?(:term_months)
     assert_not terms.key?(:monthly_payment)
   end
+
+  test "exposes a checking account's overdraft terms with an explicit floor" do
+    depository = accounts(:depository)
+    depository.depository.update!(
+      overdraft_limit: 400,
+      overdraft_interest_rate: 16.5,
+      intervention_fee_amount: 8,
+      intervention_fee_threshold: 20,
+      intervention_fee_monthly_cap: 80
+    )
+
+    terms = @fn.call[:accounts].find { |a| a[:id] == depository.id }[:terms]
+
+    assert_equal 400, terms[:overdraft_limit].to_f
+    assert_equal(-400, terms[:overdraft_floor].to_f, "the floor is signed so no caller has to guess")
+    assert_equal 16.5, terms[:overdraft_interest_rate].to_f
+    assert_equal 8, terms[:intervention_fee_amount].to_f
+    assert_equal 20, terms[:intervention_fee_threshold].to_f
+    assert_equal 80, terms[:intervention_fee_monthly_cap].to_f
+  end
+
+  test "omits overdraft terms on an account that has none" do
+    depository = accounts(:depository)
+
+    payload = @fn.call[:accounts].find { |a| a[:id] == depository.id }
+
+    assert_not payload.key?(:terms)
+  end
+
+  test "reports a variable-rate loan's hand-entered payment as its monthly payment" do
+    accounts(:loan).loan.update!(rate_type: "variable", scheduled_payment: 275)
+
+    terms = @fn.call[:accounts].find { |a| a[:id] == accounts(:loan).id }[:terms]
+
+    assert_equal 275, terms[:monthly_payment].to_f
+  end
 end

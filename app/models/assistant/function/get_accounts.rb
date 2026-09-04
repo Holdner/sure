@@ -10,11 +10,19 @@ class Assistant::Function::GetAccounts < Assistant::Function
 
         Returns account ids. Use them for account_ids filters in other tools.
 
-        Loan and credit card accounts also carry a `terms` object with the
-        borrowing terms the user recorded (rate, term, monthly payment, APR,
-        minimum payment). A key is absent when the user never entered it, so
-        treat a missing key as unknown rather than as zero. `monthly_payment` is
-        only computable for a fixed-rate loan.
+        Accounts also carry a `terms` object with whatever financial terms the
+        user recorded: a loan's rate, term and monthly payment, a card's APR and
+        minimum payment, a checking account's arranged overdraft and bank fees.
+        A key is absent when the user never entered it, so treat a missing key
+        as unknown rather than as zero.
+
+        For a checking account, `terms.overdraft_floor` is the balance the
+        account may fall to (negative). Never tell the user to stay above zero
+        when a floor is present, and never assume there is no facility just
+        because the key is missing.
+
+        For debt questions prefer get_liabilities, which adds the repayment
+        schedule and says why any figure could not be computed.
 
         Note on `terms.available_credit`: providers disagree on its meaning
         (some report the credit limit, others the remaining credit), so confirm
@@ -98,7 +106,25 @@ class Assistant::Function::GetAccounts < Assistant::Function
       case account.accountable
       when Loan then loan_terms(account.accountable)
       when CreditCard then credit_card_terms(account.accountable)
+      when Depository then depository_terms(account.accountable)
       end
+    end
+
+    # The overdraft floor is the number an assistant needs before it tells
+    # someone never to go below zero. `overdraft_limit` is stored positive, so
+    # the floor is emitted alongside it to remove any doubt about the sign.
+    def depository_terms(depository)
+      return {} unless depository.overdraft_terms?
+
+      {
+        overdraft_limit: depository.overdraft_limit,
+        overdraft_floor: depository.overdraft_limit.present? ? depository.overdraft_floor : nil,
+        overdraft_interest_rate: depository.overdraft_interest_rate,
+        intervention_fee_amount: depository.intervention_fee_amount,
+        intervention_fee_threshold: depository.intervention_fee_threshold,
+        intervention_fee_monthly_cap: depository.intervention_fee_monthly_cap,
+        intervention_fee_monthly_count_cap: depository.intervention_fee_monthly_count_cap
+      }.compact
     end
 
     # `compact` throughout: a nil rate must read as "the user never entered it",
@@ -106,13 +132,16 @@ class Assistant::Function::GetAccounts < Assistant::Function
     def loan_terms(loan)
       # Loan#monthly_payment returns nil unless rate_type is "fixed": a
       # variable-rate loan has no single scheduled payment to report.
-      monthly_payment = loan.monthly_payment
+      monthly_payment = loan.effective_payment
       original_balance = loan.original_balance
 
       {
         interest_rate: loan.interest_rate,
+        apr: loan.apr,
         rate_type: loan.rate_type,
         term_months: loan.term_months,
+        maturity_date: loan.maturity_date,
+        insurance_monthly_amount: loan.insurance_monthly_amount,
         monthly_payment: monthly_payment&.amount,
         monthly_payment_formatted: monthly_payment&.format,
         original_balance: original_balance&.amount,
