@@ -27,6 +27,15 @@ class Assistant::Function::GetLiabilities < Assistant::Function
           reason. Read it before saying a number is unknown, and tell the user
           which field to fill in rather than guessing.
 
+        Pass include_amortization: true to add the derived month-by-month
+        principal AND a comparison against the balance history Sure recorded.
+        A liability's stored balance only moves when an entry lands on the loan
+        account, so a loan repaid by direct debit from a current account sits
+        frozen between manual valuations and then jumps. When
+        `history_comparison.largest_gap.difference` is large and positive, the
+        user's net worth curve understates the repayment progress they actually
+        made, and that is worth telling them.
+
         A missing key means the user never entered that term. Never substitute
         zero for it, and never infer a rate from the balance history.
       INSTRUCTIONS
@@ -38,15 +47,24 @@ class Assistant::Function::GetLiabilities < Assistant::Function
   end
 
   def params_schema
-    build_schema(required: [], properties: {})
+    build_schema(
+      required: [],
+      properties: {
+        include_amortization: {
+          type: "boolean",
+          description: "Include the derived month-by-month principal schedule and how it compares with the recorded balance history (defaults to false; it is large)"
+        }
+      }
+    )
   end
 
-  def call(_params = {})
+  def call(params = {})
     accounts = liability_accounts
+    amortization = params["include_amortization"] == true
 
     {
       as_of_date: Date.current,
-      liabilities: accounts.map { |account| serialize(account) },
+      liabilities: accounts.map { |account| serialize(account, amortization: amortization) },
       totals_by_currency: totals_by_currency(accounts)
     }
   end
@@ -60,7 +78,7 @@ class Assistant::Function::GetLiabilities < Assistant::Function
           .to_a
     end
 
-    def serialize(account)
+    def serialize(account, amortization: false)
       payload = {
         id: account.id,
         name: account.name,
@@ -80,7 +98,68 @@ class Assistant::Function::GetLiabilities < Assistant::Function
       unavailable = unavailable_for(account)
       payload[:unavailable] = unavailable if unavailable.present?
 
+      payload[:amortization] = amortization_for(account) if amortization
+
       payload
+    end
+
+    # Opt-in: the schedule of a 20-year mortgage is 240 rows, which is not what
+    # most questions need. The divergence summary is the part that matters and
+    # is small, so it is emitted even when the full series is trimmed.
+    def amortization_for(account)
+      return { available: false, reason: "Not a loan." } unless account.accountable.is_a?(Loan)
+
+      schedule = Loan::AmortizationSchedule.new(account.accountable)
+      return { available: false, reason: schedule.unavailable_reason } unless schedule.available?
+
+      payload = {
+        available: true,
+        anchored_at_origination: schedule.anchored_at_origination?,
+        starts_on: schedule.start_date,
+        payoff_date: schedule.payoff_date,
+        total_interest: schedule.total_interest.round(2),
+        points: schedule.points.map { |point| { date: point.date, balance: point.balance } }
+      }
+
+      unless schedule.anchored_at_origination?
+        payload[:note] = "No origination date and original balance are recorded, so this schedule runs forward " \
+                         "from today only and cannot be compared with the recorded history."
+        return payload
+      end
+
+      payload.merge(recorded_history_comparison(schedule))
+    end
+
+    # The point of the whole exercise. A liability's stored balance only moves
+    # when an entry lands on the loan account, so a loan repaid by direct debit
+    # from a checking account sits frozen between manual valuations and then
+    # jumps. Quantifying the gap is what tells the user their net-worth curve
+    # understates the progress they actually made.
+    def recorded_history_comparison(schedule)
+      divergences = schedule.divergences
+      return { history_comparison: { available: false, reason: "No recorded balances in the schedule's range." } } if divergences.empty?
+
+      worst = divergences.max_by { |divergence| divergence.difference.abs }
+
+      {
+        history_comparison: {
+          available: true,
+          months_compared: divergences.size,
+          largest_gap: {
+            date: worst.date,
+            recorded_balance: worst.recorded,
+            expected_balance: worst.expected,
+            difference: worst.difference
+          },
+          note: "`recorded_balance` is what the net worth history shows; `expected_balance` is what the loan's " \
+                "own terms imply. A persistent positive difference means the recorded history understates the " \
+                "repayment progress, because a liability's stored balance only moves when an entry lands on the " \
+                "loan account itself.",
+          monthly: divergences.map do |divergence|
+            { date: divergence.date, recorded: divergence.recorded, expected: divergence.expected, difference: divergence.difference }
+          end
+        }
+      }
     end
 
     def terms_for(account)

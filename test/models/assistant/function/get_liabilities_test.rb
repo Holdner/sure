@@ -102,4 +102,66 @@ class Assistant::Function::GetLiabilitiesTest < ActiveSupport::TestCase
 
     assert_not_includes result[:liabilities].map { |l| l[:id] }, accounts(:investment).id
   end
+
+  # ---- derived amortization ---------------------------------------------------
+
+  test "omits the amortization schedule unless it is asked for" do
+    assert_not loan_payload.key?(:amortization)
+  end
+
+  test "returns the derived schedule when asked" do
+    @account.update!(balance: 10_000)
+    @loan.update!(rate_type: "variable", interest_rate: 6, scheduled_payment: 500, origination_date: nil)
+
+    amortization = @fn.call("include_amortization" => true)[:liabilities]
+      .find { |l| l[:id] == @account.id }[:amortization]
+
+    assert_equal true, amortization[:available]
+    assert_equal false, amortization[:anchored_at_origination]
+    assert amortization[:points].size.positive?
+    assert amortization[:payoff_date].present?
+    assert_match(/cannot be compared with the recorded history/, amortization[:note])
+  end
+
+  test "explains why no schedule is available rather than returning nothing" do
+    @loan.update!(rate_type: "variable", scheduled_payment: nil, interest_rate: 5)
+
+    amortization = @fn.call("include_amortization" => true)[:liabilities]
+      .find { |l| l[:id] == @account.id }[:amortization]
+
+    assert_equal false, amortization[:available]
+    assert_match(/monthly payment/, amortization[:reason])
+  end
+
+  test "quantifies how much the recorded history understates repayment" do
+    origination = Date.current.advance(months: -6).beginning_of_month
+    @account.update!(balance: 1_000)
+    @account.entries.destroy_all
+    @account.entries.create!(
+      name: "Opening", date: origination, amount: 1_000,
+      currency: @account.currency, entryable: Valuation.new(kind: "opening_anchor")
+    )
+    @loan.update!(rate_type: "variable", interest_rate: 0, scheduled_payment: 100,
+                  origination_date: origination)
+
+    (0..5).each do |month|
+      @account.balances.create!(date: origination.advance(months: month), balance: 1_000, currency: @account.currency)
+    end
+
+    comparison = @fn.call("include_amortization" => true)[:liabilities]
+      .find { |l| l[:id] == @account.id }[:amortization][:history_comparison]
+
+    assert_equal true, comparison[:available]
+    assert comparison[:months_compared].positive?
+    assert_operator comparison[:largest_gap][:difference], :>, 0
+    assert_match(/understates the repayment progress/, comparison[:note])
+  end
+
+  test "a credit card reports that it has no amortization" do
+    amortization = @fn.call("include_amortization" => true)[:liabilities]
+      .find { |l| l[:id] == accounts(:credit_card).id }[:amortization]
+
+    assert_equal false, amortization[:available]
+    assert_equal "Not a loan.", amortization[:reason]
+  end
 end

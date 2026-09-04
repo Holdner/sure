@@ -65,6 +65,7 @@ module Assistant
         Function::SimulateScenarios,
         Function::GetBalanceSheet,
         Function::GetIncomeStatement,
+        Function::GetCategoryTrends,
         Function::GetBudget,
         Function::ImportBankStatement,
         Function::SearchFamilyFiles,
