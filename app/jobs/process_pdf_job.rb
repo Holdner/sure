@@ -68,10 +68,17 @@ class ProcessPdfJob < ApplicationJob
     def upload_to_vector_store(pdf_import, document_type:)
       file_content = pdf_import.pdf_file_content
 
+      # Carries the statement id so this path and AccountStatement's own
+      # indexing job share one idempotency key and cannot both index the file.
+      statement_id = pdf_import.account_statement_id
+
+      return if statement_id.present? &&
+                pdf_import.family.family_documents.where("metadata->>'account_statement_id' = ?", statement_id).exists?
+
       family_document = pdf_import.family.upload_document(
         file_content: file_content,
         filename: pdf_import.pdf_filename,
-        metadata: { "type" => document_type }
+        metadata: { "type" => document_type, "account_statement_id" => statement_id }.compact
       )
 
       return if family_document

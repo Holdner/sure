@@ -36,6 +36,16 @@ class AccountStatement < ApplicationRecord
   has_many :pdf_imports, -> { where(type: "PdfImport").ordered }, class_name: "PdfImport", dependent: :restrict_with_error
   has_one_attached :original_file, dependent: :purge_later
 
+  # The Statement Vault and the searchable Document Store were two entirely
+  # disjoint write paths: nothing in create_from_prepared_upload! ever reached
+  # the vector store, so a statement uploaded through the web Vault or through
+  # the MCP tool was structurally unfindable by search_family_files, which
+  # answered "no documents have been uploaded" while the file sat in the
+  # database. Only /imports (PdfImport -> ProcessPdfJob) bridged the two.
+  #
+  # This closes the gap at the one point all three producers share.
+  after_create_commit :index_in_vector_store_later
+
   enum :source, { manual_upload: "manual_upload" }, validate: true, default: "manual_upload"
   enum :upload_status, { stored: "stored", failed: "failed" }, validate: true, default: "stored"
   enum :review_status, { unmatched: "unmatched", linked: "linked", rejected: "rejected" }, validate: true, default: "unmatched", scopes: false
@@ -349,6 +359,34 @@ class AccountStatement < ApplicationRecord
     currency.presence || account&.currency || family.currency
   end
 
+  # Idempotency key rather than a column: the link lives in the document's own
+  # metadata, so a re-run, or the /imports path having already indexed this
+  # file, cannot produce a duplicate.
+  def vector_store_document
+    family.family_documents.where("metadata->>'account_statement_id' = ?", id).first
+  end
+
+  def indexed_in_vector_store?
+    vector_store_document.present?
+  end
+
+  # Returns false rather than raising when no vector store is configured: an
+  # install with no embeddings endpoint must still be able to accept uploads.
+  def index_in_vector_store!
+    return false if indexed_in_vector_store?
+    return false unless original_file.attached?
+
+    family.upload_document(
+      file_content: original_file.download,
+      filename: filename,
+      metadata: {
+        "type" => "account_statement",
+        "account_statement_id" => id,
+        "account_id" => account_id
+      }.compact
+    ).present?
+  end
+
   def pdf?
     content_type.in?(ALLOWED_EXTENSION_CONTENT_TYPES[".pdf"])
   end
@@ -401,6 +439,10 @@ class AccountStatement < ApplicationRecord
 
       self.review_status = "linked" if account.present? && !linked?
       self.review_status = "unmatched" if account.blank? && linked?
+    end
+
+    def index_in_vector_store_later
+      IndexAccountStatementJob.perform_later(id)
     end
 
     def account_belongs_to_family

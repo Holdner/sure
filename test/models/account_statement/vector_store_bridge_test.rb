@@ -1,0 +1,84 @@
+require "test_helper"
+
+class AccountStatement::VectorStoreBridgeTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
+  setup do
+    @family = families(:dylan_family)
+  end
+
+  def build_statement(filename: "releve.pdf")
+    statement = @family.account_statements.build(
+      filename: filename,
+      content_type: "application/pdf",
+      byte_size: 42,
+      checksum: SecureRandom.hex(16),
+      content_sha256: SecureRandom.hex(32),
+      source: :manual_upload,
+      upload_status: :stored,
+      review_status: :unmatched,
+      currency: "USD"
+    )
+    statement.original_file.attach(io: StringIO.new("%PDF-1.4 fake"), filename: filename, content_type: "application/pdf")
+    statement
+  end
+
+  test "creating a statement enqueues its indexing" do
+    statement = build_statement
+
+    assert_enqueued_with(job: IndexAccountStatementJob) do
+      statement.save!
+    end
+  end
+
+  test "indexing pushes the file into the document store with a linking key" do
+    statement = build_statement
+    statement.save!
+
+    statement.family.expects(:upload_document).with do |args|
+      args[:filename] == "releve.pdf" &&
+        args[:metadata]["account_statement_id"] == statement.id &&
+        args[:metadata]["type"] == "account_statement"
+    end.returns(FamilyDocument.new)
+
+    assert statement.index_in_vector_store!
+  end
+
+  test "does not index the same statement twice" do
+    statement = build_statement
+    statement.save!
+
+    @family.family_documents.create!(
+      filename: "releve.pdf",
+      content_type: "application/pdf",
+      file_size: 42,
+      provider_file_id: "file_1",
+      status: "ready",
+      metadata: { "account_statement_id" => statement.id }
+    )
+
+    assert statement.indexed_in_vector_store?
+    assert_not statement.index_in_vector_store!, "a second index would duplicate the document"
+  end
+
+  test "an install with no vector store still accepts the upload" do
+    statement = build_statement
+
+    assert_nothing_raised { statement.save! }
+    assert statement.persisted?
+    assert_not statement.index_in_vector_store!, "no adapter means no indexing, not a failed upload"
+  end
+
+  test "the job never lets an indexing failure escape" do
+    statement = build_statement
+    statement.save!
+
+    AccountStatement.any_instance.stubs(:index_in_vector_store!).raises(StandardError, "boom")
+
+    assert_nothing_raised { IndexAccountStatementJob.new.perform(statement.id) }
+  end
+
+  test "the job tolerates a statement deleted before it runs" do
+    assert_nothing_raised { IndexAccountStatementJob.new.perform(SecureRandom.uuid) }
+  end
+end

@@ -6,6 +6,25 @@ class Assistant::Function::SearchFamilyFilesTest < ActiveSupport::TestCase
     @function = Assistant::Function::SearchFamilyFiles.new(@user)
   end
 
+  def build_statement(family, filename, **attrs)
+    statement = family.account_statements.build(
+      filename: filename,
+      content_type: "application/pdf",
+      byte_size: 42,
+      checksum: SecureRandom.hex(16),
+      content_sha256: SecureRandom.hex(32),
+      source: :manual_upload,
+      upload_status: :stored,
+      review_status: :unmatched,
+      currency: "USD",
+      **attrs
+    )
+    statement.original_file.attach(io: StringIO.new("%PDF-1.4 fake"), filename: filename,
+                                   content_type: "application/pdf")
+    statement.save!
+    statement
+  end
+
   test "has correct name" do
     assert_equal "search_family_files", @function.name
   end
@@ -32,23 +51,30 @@ class Assistant::Function::SearchFamilyFilesTest < ActiveSupport::TestCase
     assert_equal false, definition[:strict]
   end
 
-  test "returns no_documents error when family has no vector store" do
+  # These two used to assert an error of "no_documents" / "provider_not_configured".
+  # Both were read by assistants as "the user has uploaded nothing", which is a
+  # different claim from "no store was ever created" and was false whenever a
+  # statement sat in the vault. The tool now degrades to a metadata-only search
+  # and names the real reason.
+  test "degrades to metadata search when the family has no vector store" do
     @user.family.update!(vector_store_id: nil)
 
     result = @function.call("query" => "tax return")
 
-    assert_equal false, result[:success]
-    assert_equal "no_documents", result[:error]
+    assert_equal true, result[:success]
+    assert_equal "metadata_only", result[:search_mode]
+    assert_equal "no_vector_store", result[:reason]
   end
 
-  test "returns provider_not_configured when no adapter is available" do
+  test "degrades to metadata search when no adapter is available and says why" do
     @user.family.update!(vector_store_id: "vs_test123")
     VectorStore::Registry.stubs(:adapter).returns(nil)
 
     result = @function.call("query" => "tax return")
 
-    assert_equal false, result[:success]
-    assert_equal "provider_not_configured", result[:error]
+    assert_equal true, result[:success]
+    assert_equal "provider_not_configured", result[:reason]
+    assert_match(/VECTOR_STORE_PROVIDER/, result[:message])
   end
 
   test "returns search results on success" do
@@ -125,5 +151,45 @@ class Assistant::Function::SearchFamilyFilesTest < ActiveSupport::TestCase
     VectorStore::Registry.stubs(:adapter).returns(mock_adapter)
 
     @function.call("query" => "test", "max_results" => 50)
+  end
+
+  test "never claims nothing was uploaded when statements are on file" do
+    family = @user.family
+    family.update!(vector_store_id: nil)
+
+    statement = build_statement(family, "releve-septembre.pdf",
+                                period_start_on: Date.new(2026, 9, 1),
+                                period_end_on: Date.new(2026, 9, 30))
+
+    result = Assistant::Function::SearchFamilyFiles.new(@user).call("query" => "releve")
+
+    assert_equal true, result[:success]
+    assert_equal "metadata_only", result[:search_mode]
+    assert_equal "no_vector_store", result[:reason]
+    assert_includes result[:results].map { |r| r[:account_statement_id] }, statement.id
+    assert_no_match(/No documents have been uploaded/, result[:message])
+    assert_match(/get_document_text/, result[:message])
+  end
+
+  test "says plainly when nothing is on file at all" do
+    family = @user.family
+    family.update!(vector_store_id: nil)
+    family.account_statements.destroy_all
+
+    result = Assistant::Function::SearchFamilyFiles.new(@user).call("query" => "anything")
+
+    assert_equal 0, result[:result_count]
+    assert_match(/genuinely nothing on file/, result[:message])
+  end
+
+  test "an over-specific query still lists what exists rather than reading as empty" do
+    family = @user.family
+    family.update!(vector_store_id: nil)
+
+    build_statement(family, "releve.pdf")
+
+    result = Assistant::Function::SearchFamilyFiles.new(@user).call("query" => "zzzznotamatchzzzz")
+
+    assert_equal 1, result[:result_count]
   end
 end
