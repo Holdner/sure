@@ -35,7 +35,10 @@ class AccountStatement::VectorStoreBridgeTest < ActiveSupport::TestCase
     statement = build_statement
     statement.save!
 
-    statement.family.expects(:upload_document).with do |args|
+    # Expected on the class, not on statement.family: index_in_vector_store!
+    # locks the row, and the reload that comes with the lock resets the cached
+    # association, so an expectation set on this instance would never be met.
+    Family.any_instance.expects(:upload_document).with do |args|
       args[:filename] == "releve.pdf" &&
         args[:metadata]["account_statement_id"] == statement.id &&
         args[:metadata]["type"] == "account_statement"
@@ -59,6 +62,21 @@ class AccountStatement::VectorStoreBridgeTest < ActiveSupport::TestCase
 
     assert statement.indexed_in_vector_store?
     assert_not statement.index_in_vector_store!, "a second index would duplicate the document"
+  end
+
+  # The existence check alone is check-then-write, and ProcessPdfJob runs the
+  # same check on a different queue with no ordering between them: two workers
+  # that both read "not indexed" both upload, leaving two documents for one
+  # statement. Only the row lock serializes them, so its absence is the bug.
+  # A real race cannot be reproduced in-process, so what is pinned is that the
+  # lock is taken before the check.
+  test "takes the statement row lock before deciding to index" do
+    statement = build_statement
+    statement.save!
+
+    statement.expects(:with_lock).once
+
+    statement.index_in_vector_store!
   end
 
   test "an install with no vector store still accepts the upload" do

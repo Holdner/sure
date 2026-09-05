@@ -83,6 +83,18 @@ class LoanTest < ActiveSupport::TestCase
     assert_equal 12, @loan.remaining_payments
   end
 
+  # A declared 0% is a rate. A blank one is not, and treating it as zero quoted
+  # the payoff count of an interest-free loan: always too short, and delivered
+  # to the assistant through get_liabilities as if it were established.
+  test "an unknown interest rate yields no payoff count rather than a zero-rate one" do
+    @account.update!(balance: 1_200)
+    @loan.update!(rate_type: "variable", interest_rate: nil, scheduled_payment: 100)
+
+    assert_nil @loan.remaining_payments
+    assert_nil @loan.payoff_date
+    assert_nil @loan.remaining_interest
+  end
+
   test "a cleared loan has no payments left" do
     @account.update!(balance: 0)
     @loan.update!(rate_type: "fixed", interest_rate: 3.5, term_months: 360)

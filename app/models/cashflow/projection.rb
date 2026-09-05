@@ -134,6 +134,23 @@ class Cashflow::Projection
     declared_income_series.any?
   end
 
+  # Whether the projection actually carries incoming money, whatever its
+  # provenance. `declared_income?` is narrower on purpose (hand-declared series
+  # only), but the two must never be confused: the events are built from every
+  # active series, so a detected-then-confirmed salary IS counted, and saying
+  # "this projection contains no income" over the top of it would be false.
+  def income_counted?
+    recurring_events.any? { |event| event.direction == :in }
+  end
+
+  # Series whose schedule could not be resolved, so their bills are missing from
+  # the projection. Named rather than dropped: the low point is too high by
+  # whatever these would have cost.
+  def unschedulable_series
+    recurring_events
+    @unschedulable_series || []
+  end
+
   # Stated rather than implied. Every figure here rests on these, and an
   # assistant that presents a projection without them is overstating how much
   # is actually known.
@@ -145,6 +162,8 @@ class Cashflow::Projection
       daily_discretionary_spend: daily_discretionary_spend.round(2),
       discretionary_basis: "median monthly expense minus known recurring outflows, spread evenly",
       declared_income: declared_income?,
+      income_counted: income_counted?,
+      series_not_scheduled: unschedulable_series.presence,
       recurring_events_counted: recurring_events.size,
       occurrences_materialized_through: materialization_frontier
     }.compact
@@ -157,10 +176,21 @@ class Cashflow::Projection
       list << "No depository account in #{family.currency} is visible to this user, so there is nothing to project."
     end
 
-    unless declared_income?
-      list << "No income has been declared (Bills, Income plan), so this projection contains NO incoming " \
-              "salary or other earnings. Detected bank inflows are deliberately not used as income here. " \
-              "Say this plainly before quoting any low point: the figure is a floor, not a forecast."
+    if !income_counted?
+      list << "No income has been declared (Bills, Income plan) and no recurring inflow was found, so this " \
+              "projection contains NO incoming salary or other earnings. Say this plainly before quoting any " \
+              "low point: the figure is a floor, not a forecast."
+    elsif !declared_income?
+      list << "The income in this projection comes from detected recurring inflows, not from a declared " \
+              "income plan (Bills, Income plan). Detection can miss a pay rise, a bonus or a changed pay " \
+              "date, so treat the low point as indicative and say the income was inferred, not declared."
+    end
+
+    if unschedulable_series.any?
+      list << "#{unschedulable_series.size} recurring series could not be scheduled " \
+              "(#{unschedulable_series.take(3).join(', ')}), most often a non-monthly series saved without " \
+              "an anchor date. Their bills are MISSING from this projection, so the low point is too high " \
+              "by whatever they cost."
     end
 
     if overdraft_floor.zero?
@@ -284,25 +314,42 @@ class Cashflow::Projection
     # the schedule takes over. Splitting per series and per date is what keeps
     # the two sources from double counting.
     def projected_schedule_events
+      @unschedulable_series = []
+
       active_series.flat_map do |series|
         frontier = series_frontier[series.id]
         from = frontier ? [ frontier + 1, start_date ].max : start_date
         next [] if from > end_date
 
-        series.schedule.occurrences_between(from, end_date).map do |date|
+        dates = schedule_dates(series, from)
+        next [] if dates.nil?
+
+        dates.map do |date|
           Event.new(
             date: date,
-            label: series.name.presence || series.merchant&.name || "Recurring",
+            label: series_label(series),
             amount: series.amount.to_d.abs,
             direction: series.amount.to_d.negative? ? :in : :out,
             source: "schedule"
           )
         end
       end
+    end
+
+    # Scoped to the one series that cannot be scheduled. A rescue around the
+    # whole loop would drop every OTHER series' events with it and turn the
+    # projection into a comfortable-looking fiction, which is the exact failure
+    # this class exists to prevent. What is dropped is counted and surfaced in
+    # `warnings`, never swallowed.
+    def schedule_dates(series, from)
+      series.schedule.occurrences_between(from, end_date)
     rescue ArgumentError
-      # Schedule#initialize raises when a series with interval > 1 has no anchor
-      # date. One malformed series must not take the whole projection down.
-      []
+      @unschedulable_series << series_label(series)
+      nil
+    end
+
+    def series_label(series)
+      series.name.presence || series.merchant&.name || "Recurring"
     end
 
     def active_series
@@ -340,11 +387,27 @@ class Cashflow::Projection
       series_frontier.values.compact.max
     end
 
+    # Each series amortized over its OWN cadence, never over the horizon. An
+    # annual premium that happens to land inside a 90-day window is worth a
+    # twelfth of itself per month, not a third: dividing the windowed total by
+    # the horizon inflated the known recurring load, drove the discretionary
+    # baseline to zero through the `max(…, 0)` below it, and handed back a
+    # projection that spent nothing day to day. Same normalization as
+    # RecurringTransaction#monthly_equivalent_amount, so the two agree.
     def monthly_recurring_outflow
-      total = recurring_events.select { |event| event.direction == :out }.sum(&:amount)
-      months = horizon_days / 30.4375
+      active_series.sum(0.to_d) do |series|
+        series.amount.to_d.positive? ? monthly_equivalent(series) : 0.to_d
+      end
+    end
 
-      months.zero? ? 0.to_d : total / months
+    def monthly_equivalent(series)
+      per_year = series.schedule.occurrences_per_year.to_d
+      series.amount.to_d.abs * per_year / 12
+    rescue ArgumentError
+      # Already named in `warnings` through unschedulable_series; counting it as
+      # zero here keeps the discretionary baseline generous rather than hiding
+      # the gap behind an invented cadence.
+      0.to_d
     end
 
     # Scoped the same way as `accounts`. A caller who named the accounts it

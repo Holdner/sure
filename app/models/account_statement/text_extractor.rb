@@ -16,6 +16,12 @@ class AccountStatement
   class TextExtractor
     TEXT_CONTENT_TYPES = %w[text/plain text/csv application/json text/markdown].freeze
 
+    # A text file has no pages, so it is cut into fixed-size chunks. Returning
+    # the whole file as a single page defeated get_document_text's per-call
+    # character budget: its window keeps the first page whole whatever its size,
+    # so a large CSV came back entire in one response.
+    TEXT_PAGE_CHARS = 3_000
+
     Result = Data.define(:pages, :page_count, :extractable, :note)
 
     def initialize(statement)
@@ -30,7 +36,8 @@ class AccountStatement
       if @statement.pdf?
         extract_pdf(content)
       elsif TEXT_CONTENT_TYPES.include?(@statement.content_type)
-        Result.new(pages: [ encode(content) ], page_count: 1, extractable: true, note: nil)
+        pages = paginate_text(encode(content))
+        Result.new(pages: pages, page_count: pages.size, extractable: true, note: nil)
       else
         unsupported("Text extraction supports PDF and plain-text files. This file is #{@statement.content_type}.")
       end
@@ -55,6 +62,12 @@ class AccountStatement
         Result.new(pages: pages, page_count: pages.size, extractable: true, note: nil)
       rescue PDF::Reader::MalformedPDFError, PDF::Reader::UnsupportedFeatureError => e
         unsupported("The PDF could not be parsed (#{e.class.name.demodulize}).")
+      end
+
+      def paginate_text(text)
+        return [ "" ] if text.empty?
+
+        (0...text.length).step(TEXT_PAGE_CHARS).map { |offset| text[offset, TEXT_PAGE_CHARS] }
       end
 
       def encode(text)

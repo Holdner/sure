@@ -90,19 +90,30 @@ class Assistant::Function::GetDocumentText < Assistant::Function
       result.pages[(from_page - 1)..].to_a.each_with_index do |text, index|
         break if chars.positive? && chars + text.length > MAX_CHARS
 
-        selected << { page: from_page + index, text: text }
-        chars += text.length
+        # The guard above only fires once something is already selected, so a
+        # first page longer than the whole budget would otherwise be emitted
+        # entire. Cutting it is the lesser evil against a response that blows
+        # the context window, and the cut is declared rather than silent.
+        page = { page: from_page + index, text: text.first(MAX_CHARS) }
+        page[:truncated] = true if text.length > MAX_CHARS
+
+        selected << page
+        chars += page[:text].length
         last_page = from_page + index
       end
 
       more = last_page < result.page_count
+      cut = selected.any? { |page| page[:truncated] }
 
       {
         from_page: from_page,
         to_page: last_page,
         pages: selected,
         has_more_pages: more,
-        next_page: more ? last_page + 1 : nil
+        next_page: more ? last_page + 1 : nil,
+        note: cut ? "A page was longer than one response can carry and was cut at #{MAX_CHARS} characters. " \
+                    "The rest of that page cannot be reached through paging. Say the page was truncated " \
+                    "rather than treating what is here as the whole page." : nil
       }.compact
     end
 

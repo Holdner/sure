@@ -74,6 +74,40 @@ class Assistant::Function::GetDocumentTextTest < ActiveSupport::TestCase
     assert_equal false, result[:has_more_pages]
   end
 
+  # The window's size guard only fires once a page has already been selected, so
+  # a text file returned as one giant page went out whole and blew the per-call
+  # budget the tool documents.
+  test "a large text file is paged instead of returned whole" do
+    rows = (1..2_000).map { |i| "2026-01-01,#{i},LIBELLE #{i}" }.join("\n")
+    statement = create_statement(filename: "big.csv", content: rows, content_type: "text/csv")
+
+    result = @fn.call("account_statement_id" => statement.id)
+    returned = result[:pages].sum { |page| page[:text].length }
+
+    assert_operator result[:page_count], :>, 1
+    assert_operator returned, :<=, Assistant::Function::GetDocumentText::MAX_CHARS
+    assert_equal true, result[:has_more_pages]
+    assert_equal result[:to_page] + 1, result[:next_page]
+  end
+
+  test "a single page longer than the budget is cut and says so" do
+    oversized = "A" * (Assistant::Function::GetDocumentText::MAX_CHARS + 5_000)
+    statement = create_statement
+
+    AccountStatement::TextExtractor.any_instance.stubs(:extract).returns(
+      AccountStatement::TextExtractor::Result.new(
+        pages: [ oversized ], page_count: 1, extractable: true, note: nil
+      )
+    )
+
+    result = @fn.call("account_statement_id" => statement.id)
+    page = result[:pages].first
+
+    assert_equal Assistant::Function::GetDocumentText::MAX_CHARS, page[:text].length
+    assert_equal true, page[:truncated]
+    assert_match(/truncated/, result[:note])
+  end
+
   test "reports a scan with no text layer as unreadable and names the reason" do
     statement = create_statement
 

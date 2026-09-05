@@ -373,18 +373,24 @@ class AccountStatement < ApplicationRecord
   # Returns false rather than raising when no vector store is configured: an
   # install with no embeddings endpoint must still be able to accept uploads.
   def index_in_vector_store!
-    return false if indexed_in_vector_store?
     return false unless original_file.attached?
 
-    family.upload_document(
-      file_content: original_file.download,
-      filename: filename,
-      metadata: {
-        "type" => "account_statement",
-        "account_statement_id" => id,
-        "account_id" => account_id
-      }.compact
-    ).present?
+    # Row lock, not just the existence check: ProcessPdfJob runs the same check
+    # on another queue with no ordering between them, so two workers reading
+    # "not indexed" would both upload and leave two documents for one statement.
+    with_lock do
+      next false if indexed_in_vector_store?
+
+      family.upload_document(
+        file_content: original_file.download,
+        filename: filename,
+        metadata: {
+          "type" => "account_statement",
+          "account_statement_id" => id,
+          "account_id" => account_id
+        }.compact
+      ).present?
+    end
   end
 
   def pdf?

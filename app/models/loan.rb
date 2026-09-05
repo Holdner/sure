@@ -77,7 +77,12 @@ class Loan < ApplicationRecord
     return nil if payment.nil? || payment <= 0
 
     rate = monthly_rate
-    return (balance / payment).ceil if rate.nil? || rate.zero?
+    # An unknown rate is not a zero rate. Dividing the balance by the instalment
+    # would quote the payoff count of an interest-free loan, which is always too
+    # short and reads as authoritative. A declared 0% is a real rate and does
+    # take that branch.
+    return nil if rate.nil?
+    return (balance / payment).ceil if rate.zero?
 
     interest_due = balance * rate
     # A payment that does not even cover one month of interest never clears the

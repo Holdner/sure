@@ -221,4 +221,71 @@ class Cashflow::ProjectionTest < ActiveSupport::TestCase
     assert_equal 0, projection.starting_balance
     assert(projection.warnings.any? { |w| w.include?("nothing to project") })
   end
+
+  # ---- what a broken series must not take down with it -----------------------
+
+  # A rescue around the whole loop returned [] for every series, so one series
+  # that could not be scheduled emptied the projection of every OTHER series'
+  # bills and made it look comfortable.
+  #
+  # The raise is stubbed rather than set up in the database on purpose:
+  # recurring_transactions.last_occurrence_date is NOT NULL and Schedule.for
+  # falls back to it, so no persisted series can actually reach the interval > 1
+  # guard today. This pins the scoping of the rescue, which is what was wrong,
+  # without pretending the state is reachable.
+  test "a series whose schedule raises does not drop the others" do
+    declare_series(name: "Rent", amount: 900, day: 5)
+    declare_series(name: "Water", amount: 120, day: 20)
+
+    projection = project(horizon_days: 120)
+    loaded = projection.send(:active_series)
+    loaded.find { |series| series.name == "Water" }
+          .stubs(:schedule).raises(ArgumentError, "an anchor_date is required")
+
+    assert projection.days.sum(&:outflows).positive?, "the other series must still produce outflows"
+    assert_equal [ "Water" ], projection.unschedulable_series
+    assert(projection.warnings.any? { |w| w.include?("could not be scheduled") })
+  end
+
+  # ---- income that is counted must not be denied ------------------------------
+
+  # The inflows come from every active series, but the warning only looked at
+  # hand-declared ones, so a detected-then-confirmed salary was added to the
+  # balance while the assistant was told the projection contained no income.
+  test "does not claim there is no income when a detected series supplies it" do
+    series = declare_series(name: "Payroll", amount: -2_000, day: 28, bill_type: "income")
+    series.update_column(:manual, false)
+
+    projection = project(horizon_days: 60)
+
+    assert_not projection.declared_income?
+    assert projection.income_counted?
+    assert projection.days.sum(&:inflows).positive?
+    assert(projection.warnings.none? { |w| w.include?("contains NO incoming") })
+    assert(projection.warnings.any? { |w| w.include?("inferred, not declared") })
+  end
+
+  test "still says plainly when no income reaches the projection at all" do
+    declare_series(name: "Rent", amount: 900, day: 5)
+
+    projection = project(horizon_days: 60)
+
+    assert_not projection.income_counted?
+    assert(projection.warnings.any? { |w| w.include?("contains NO incoming") })
+  end
+
+  # ---- cadence, not horizon ---------------------------------------------------
+
+  # An annual premium landing inside a 90-day window was amortized over the
+  # window, so 1_200 read as ~405 a month. That inflated the known recurring
+  # load, and the max(..., 0) below it drove discretionary spend to zero.
+  test "amortizes an annual charge over its own cadence, not the horizon" do
+    premium = declare_series(name: "Insurance", amount: 1_200, day: 15)
+    premium.recurrence_rules.create!(frequency: "yearly", day_of_month: 15, month_of_year: Date.current.month)
+
+    projection = project(horizon_days: 90)
+    monthly = projection.send(:monthly_recurring_outflow)
+
+    assert_in_delta 100, monthly, 0.01
+  end
 end
