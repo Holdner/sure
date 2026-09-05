@@ -129,4 +129,32 @@ class Assistant::Function::SimulateScenariosTest < ActiveSupport::TestCase
     assert result[:warnings].present?
     assert_not result[:comparison].first.key?(:assumptions)
   end
+
+  # Each scenario used to build a whole new projection, so one call re-ran the
+  # account scope, the series scope, the occurrence window and the frontier once
+  # per scenario. They are identical by construction, so they are queried once.
+  test "queries the shared scopes once, not once per scenario" do
+    scenarios = 5.times.map do |i|
+      { "label" => "s#{i}", "movements" => [ { "date" => (Date.current + 2).to_s, "amount" => 10 } ] }
+    end
+
+    series_queries = 0
+    counter = ->(_name, _start, _finish, _id, payload) do
+      series_queries += 1 if payload[:sql].to_s.include?("recurring_transactions")
+    end
+
+    ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { call(scenarios) }
+
+    assert_operator series_queries, :<=, 3,
+                    "expected the recurring scopes to be read once for the whole call, got #{series_queries} queries"
+  end
+
+  test "a scenario still differs from the baseline after sharing the base data" do
+    result = call([ { "label" => "gros achat",
+                      "movements" => [ { "date" => (Date.current + 3).to_s, "amount" => 5_000 } ] } ])
+
+    baseline, scenario = result[:comparison]
+
+    assert_operator scenario[:low_point][:balance], :<, baseline[:low_point][:balance]
+  end
 end

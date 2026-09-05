@@ -113,7 +113,7 @@ class Assistant::Function::SearchFamilyFiles < Assistant::Function
       )
     end
 
-    mapped = drop_inaccessible(results).map do |result|
+    mapped = family.readable_documents(results, user).map do |result|
       { content: result[:content], filename: result[:filename], score: result[:score] }
     end
 
@@ -145,40 +145,6 @@ class Assistant::Function::SearchFamilyFiles < Assistant::Function
   end
 
   private
-    # The document store has no account dimension: family_documents carries no
-    # account_id column and Family#search_documents filters on nothing but
-    # vector_store_id, so every hit is family-wide by construction. That was
-    # tolerable while only /imports fed it. This branch added an
-    # after_create_commit that indexes EVERY vault upload, including statements
-    # on accounts a member cannot see, so the same family-wide search now
-    # reaches their contents.
-    #
-    # Scoped deliberately narrowly: only documents carrying account_id in their
-    # metadata, which is exactly the set this branch newly indexes. Older rows
-    # have no such key and keep their previous behaviour, so this closes what
-    # was opened without silently hiding documents users can see today. The
-    # proper fix is an account column on family_documents, which belongs
-    # upstream rather than in this fork.
-    def drop_inaccessible(results)
-      file_ids = results.filter_map { |result| result[:file_id] }.uniq
-      return results if file_ids.empty?
-
-      restricted = family.family_documents
-                         .where(provider_file_id: file_ids)
-                         .where.not("metadata->>'account_id' IS NULL")
-                         .pluck(:provider_file_id, Arel.sql("metadata->>'account_id'"))
-                         .to_h
-
-      return results if restricted.empty?
-
-      allowed = user.accessible_accounts.pluck(:id).map(&:to_s).to_set
-
-      results.reject do |result|
-        account_id = restricted[result[:file_id]]
-        account_id.present? && !allowed.include?(account_id)
-      end
-    end
-
     # Metadata-only search over the Statement Vault: filename, institution and
     # account hints. No document CONTENT, because extracting it is exactly what
     # needs the machinery that is missing here. get_document_text reads one

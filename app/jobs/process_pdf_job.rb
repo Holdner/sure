@@ -76,10 +76,12 @@ class ProcessPdfJob < ApplicationJob
 
       return upload_document(pdf_import, document_type, nil) if statement.nil?
 
-      statement.with_lock { upload_document(pdf_import, document_type, statement.id) }
+      statement.with_lock { upload_document(pdf_import, document_type, statement) }
     end
 
-    def upload_document(pdf_import, document_type, statement_id)
+    def upload_document(pdf_import, document_type, statement)
+      statement_id = statement&.id
+
       if statement_id.present? &&
          pdf_import.family.family_documents.where("metadata->>'account_statement_id' = ?", statement_id).exists?
         return
@@ -88,7 +90,14 @@ class ProcessPdfJob < ApplicationJob
       family_document = pdf_import.family.upload_document(
         file_content: pdf_import.pdf_file_content,
         filename: pdf_import.pdf_filename,
-        metadata: { "type" => document_type, "account_statement_id" => statement_id }.compact
+        # account_id carried so the document lands with an owning account and is
+        # filtered out of another member's search. This path predates the vault
+        # bridge and was the one leak that outlived it.
+        metadata: {
+          "type" => document_type,
+          "account_statement_id" => statement_id,
+          "account_id" => statement&.account_id || pdf_import.account_id
+        }.compact
       )
 
       return if family_document

@@ -65,8 +65,11 @@ class IncomeStatement
       @series ||= begin
         by_category = Hash.new { |hash, key| hash[key] = [] }
 
+        # One grouped query for the whole window rather than one per month.
+        monthly = income_statement.monthly_category_totals(classification: classification, periods: periods)
+
         periods.each_with_index do |period, index|
-          totals = income_statement.public_send("#{classification}_totals", period: period)
+          totals = monthly[period]
 
           totals.category_totals.reject { |total| total.category.subcategory? }.each do |total|
             values = (by_category[total.category.name] ||= Array.new(periods.size, 0.to_d))

@@ -129,4 +129,22 @@ class Assistant::Function::GetCategoryTrendsTest < ActiveSupport::TestCase
 
     assert_equal "income", result[:classification]
   end
+
+  # The tool sells itself as "one call instead of thousands of rows", but it used
+  # to fire one aggregation per month of the window, so asking for two years cost
+  # 24 scans. One grouped query returns the same numbers.
+  test "aggregates the whole window in a single query" do
+    spend(100, months_ago: 1)
+
+    aggregations = 0
+    counter = ->(_name, _start, _finish, _id, payload) do
+      aggregations += 1 if payload[:sql].to_s.include?("is_uncategorized_investment")
+    end
+
+    ActiveSupport::Notifications.subscribed(counter, "sql.active_record") do
+      IncomeStatement::CategoryTrends.new(@family, user: @user, months: 12).series
+    end
+
+    assert_equal 1, aggregations, "expected one grouped aggregation for a 12-month window, got #{aggregations}"
+  end
 end

@@ -39,6 +39,40 @@ class Cashflow::Projection
   def start_date = Date.current
   def end_date = Date.current + horizon_days
 
+  # Memos that cannot depend on the adjustments, so a sibling projection can
+  # inherit them. An allowlist rather than an exclusion list on purpose: adding
+  # a memo here is a decision, forgetting to exclude one would be a silent bug.
+  # `@events`, `@days` and everything derived from them are deliberately absent.
+  SHAREABLE_MEMOS = %i[
+    @accounts @starting_balance @income_statement
+    @accessible_series @active_series @declared_income_series
+    @occurrences_in_window @series_frontier
+    @recurring_events @unschedulable_series @daily_discretionary_spend
+  ].freeze
+
+  # Same base, different dated movements. simulate_scenarios built one full
+  # projection per scenario plus a baseline, so a single call re-ran the account
+  # scope, the series scope, the occurrence window, the frontier and the income
+  # statement six times over for inputs that are identical by construction.
+  def with_adjustments(adjustments)
+    sibling = self.class.new(
+      family,
+      user: user,
+      horizon_days: horizon_days,
+      account_ids: @account_ids,
+      extra_thresholds: @extra_thresholds,
+      adjustments: adjustments
+    )
+
+    SHAREABLE_MEMOS.each do |memo|
+      next unless instance_variable_defined?(memo)
+
+      sibling.instance_variable_set(memo, instance_variable_get(memo))
+    end
+
+    sibling
+  end
+
   def accounts
     @accounts ||= begin
       scope = user.accessible_accounts.visible

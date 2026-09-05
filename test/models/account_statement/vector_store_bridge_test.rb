@@ -79,6 +79,27 @@ class AccountStatement::VectorStoreBridgeTest < ActiveSupport::TestCase
     statement.index_in_vector_store!
   end
 
+  # The account link decides who may read the document back, so it lives in a
+  # column rather than a jsonb key: metadata cannot be joined, indexed or
+  # constrained, and the store itself is one family-wide index.
+  test "an indexed statement lands with its owning account on the document" do
+    statement = build_statement
+    statement.save!
+
+    VectorStore::Registry.stubs(:adapter).returns(
+      stub(
+        upload_file: VectorStore::Response.new(success?: true, data: { file_id: "file_acct" }, error: nil)
+      )
+    )
+    @family.update!(vector_store_id: "vs_test")
+
+    statement.index_in_vector_store!
+    document = @family.family_documents.find_by(provider_file_id: "file_acct")
+
+    assert_equal statement.account_id, document.account_id
+    assert_includes @family.family_documents.readable_by(users(:family_admin)), document
+  end
+
   test "an install with no vector store still accepts the upload" do
     statement = build_statement
 

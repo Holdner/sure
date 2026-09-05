@@ -206,7 +206,7 @@ class Assistant::Function::SearchFamilyFilesTest < ActiveSupport::TestCase
     family.family_documents.create!(
       filename: "fiche-de-paie.pdf", content_type: "application/pdf", file_size: 42,
       provider_file_id: "file-private", status: "ready",
-      metadata: { "account_id" => private_account.id }
+      account: private_account
     )
 
     mock_adapter = mock("vector_store_adapter")

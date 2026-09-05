@@ -103,7 +103,7 @@ class Assistant::Function::SimulateScenarios < Assistant::Function
       horizon_days: baseline.horizon_days,
       currency: family.currency,
       comparison: [ summarize("current", baseline, baseline) ] +
-                  scenarios.map { |scenario| summarize_scenario(scenario, horizon, account_ids, thresholds, baseline) },
+                  scenarios.map { |scenario| summarize_scenario(scenario, baseline) },
       # Carried once rather than repeated per scenario: they are identical for
       # every scenario and would otherwise be paid for five times over.
       assumptions: baseline.assumptions,
@@ -123,9 +123,12 @@ class Assistant::Function::SimulateScenarios < Assistant::Function
       )
     end
 
-    def summarize_scenario(scenario, horizon, account_ids, thresholds, baseline)
+    # Derived from the baseline rather than rebuilt: the accounts, series,
+    # occurrences and income statement are identical for every scenario in a
+    # call, so they are queried once and carried.
+    def summarize_scenario(scenario, baseline)
       adjustments = build_adjustments(scenario)
-      projection = projection_for(horizon, account_ids, thresholds, adjustments)
+      projection = baseline.with_adjustments(adjustments)
 
       summarize(scenario["label"].to_s.presence || "scenario", projection, baseline)
         .merge(movements_applied: adjustments.size)
