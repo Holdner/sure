@@ -171,6 +171,64 @@ class Assistant::Function::SearchFamilyFilesTest < ActiveSupport::TestCase
     assert_match(/get_document_text/, result[:message])
   end
 
+  # Every other vault tool gates on statement_manager? first. Without the same
+  # gate here, full-text search simply being unconfigured became a way around
+  # the role check, and unlinked statements are exactly what viewable_by?
+  # reserves to a manager.
+  test "a guest gets no vault inventory from the fallback" do
+    family = @user.family
+    family.update!(vector_store_id: nil)
+    build_statement(family, "releve-prive.pdf")
+
+    guest = users(:family_member)
+    guest.update!(role: "guest")
+
+    result = Assistant::Function::SearchFamilyFiles.new(guest).call("query" => "releve")
+
+    assert_equal 0, result[:result_count]
+    assert_empty result[:results]
+    assert_match(/admin or member role/, result[:message])
+    assert_no_match(/releve-prive/, result.to_s)
+  end
+
+  # The document store is family-wide by construction, and this branch started
+  # feeding it every vault upload. A statement on an account the caller cannot
+  # see must not come back through the vector path either.
+  test "drops content from a document on an account the caller cannot access" do
+    family = @user.family
+    family.update!(vector_store_id: "vs_test123")
+
+    private_account = family.accounts.create!(
+      accountable: Depository.new, owner: users(:family_member),
+      name: "Jakob Checking", balance: 500, currency: "USD"
+    )
+
+    family.family_documents.create!(
+      filename: "fiche-de-paie.pdf", content_type: "application/pdf", file_size: 42,
+      provider_file_id: "file-private", status: "ready",
+      metadata: { "account_id" => private_account.id }
+    )
+
+    mock_adapter = mock("vector_store_adapter")
+    mock_adapter.stubs(:search).returns(
+      VectorStore::Response.new(
+        success?: true,
+        data: [
+          { content: "Salaire net 3 200,00", filename: "fiche-de-paie.pdf", score: 0.9, file_id: "file-private" },
+          { content: "Loyer 900,00", filename: "quittance.pdf", score: 0.8, file_id: "file-shared" }
+        ],
+        error: nil
+      )
+    )
+    VectorStore::Registry.stubs(:adapter).returns(mock_adapter)
+
+    result = Assistant::Function::SearchFamilyFiles.new(@user).call("query" => "salaire")
+
+    assert_equal 1, result[:result_count]
+    assert_equal "quittance.pdf", result[:results].first[:filename]
+    assert_no_match(/Salaire net/, result.to_s)
+  end
+
   test "says plainly when nothing is on file at all" do
     family = @user.family
     family.update!(vector_store_id: nil)

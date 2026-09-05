@@ -352,12 +352,23 @@ class Cashflow::Projection
       series.name.presence || series.merchant&.name || "Recurring"
     end
 
+    # Every recurring read goes through this one scope. #accounts is restricted
+    # to the caller, but the series driving the projection were read off the
+    # family, and their names and amounts are echoed back verbatim in `events`,
+    # `assumptions` and `warnings`. With per-account sharing turned off that let
+    # a member read another member's private bills and salary out of a
+    # projection built on their own accounts. Same scope get_recurring_transactions
+    # and the Bills tools use; its own comment exists for this exact reason.
+    def accessible_series
+      @accessible_series ||= family.recurring_transactions.accessible_by(user)
+    end
+
     def active_series
-      @active_series ||= family.recurring_transactions
-                               .where(status: :active, destination_account_id: nil)
-                               .where(currency: family.currency)
-                               .includes(:merchant, :recurrence_rules)
-                               .to_a
+      @active_series ||= accessible_series
+                           .where(status: :active, destination_account_id: nil)
+                           .where(currency: family.currency)
+                           .includes(:merchant, :recurrence_rules)
+                           .to_a
     end
 
     def declared_income_series
@@ -367,6 +378,7 @@ class Cashflow::Projection
     def occurrences_in_window
       @occurrences_in_window ||= family.recurring_occurrences
                                        .joins(:recurring_transaction)
+                                       .where(recurring_transaction_id: accessible_series.select(:id))
                                        .where(recurring_transactions: { status: :active, destination_account_id: nil })
                                        .where(currency: family.currency)
                                        .where(due_on: start_date..end_date)
@@ -379,6 +391,7 @@ class Cashflow::Projection
     # owed.
     def series_frontier
       @series_frontier ||= family.recurring_occurrences
+                                 .where(recurring_transaction_id: accessible_series.select(:id))
                                  .group(:recurring_transaction_id)
                                  .maximum(:due_on)
     end

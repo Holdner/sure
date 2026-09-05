@@ -222,6 +222,44 @@ class Cashflow::ProjectionTest < ActiveSupport::TestCase
     assert(projection.warnings.any? { |w| w.include?("nothing to project") })
   end
 
+  # ---- what belongs to somebody else ------------------------------------------
+
+  # The accounts were scoped to the caller but the series driving the projection
+  # were read off the family, and their names and amounts come back out through
+  # `events`, `assumptions` and `warnings`. With per-account sharing off, that is
+  # another member's private obligations handed to a caller who cannot see the
+  # account they sit on.
+  test "does not leak a series on an account the caller cannot access" do
+    other = users(:family_member)
+    private_account = @family.accounts.create!(
+      accountable: Depository.new,
+      owner: other,
+      name: "Jakob Checking",
+      balance: 500,
+      currency: "USD"
+    )
+
+    @family.recurring_transactions.create!(
+      name: "Therapie",
+      amount: 90,
+      currency: "USD",
+      account: private_account,
+      bill_type: "bill",
+      manual: true,
+      status: "active",
+      expected_day_of_month: 10,
+      anchor_date: Date.current.beginning_of_month + 9,
+      last_occurrence_date: Date.current - 1.month,
+      next_expected_date: Date.current.beginning_of_month.next_month + 9
+    )
+    declare_series(name: "Rent", amount: 900, day: 5)
+
+    labels = project(horizon_days: 60).events.map(&:label)
+
+    assert_includes labels, "Rent", "the caller's own series must still be projected"
+    assert_not_includes labels, "Therapie"
+  end
+
   # ---- what a broken series must not take down with it -----------------------
 
   # A rescue around the whole loop returned [] for every series, so one series

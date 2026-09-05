@@ -113,7 +113,7 @@ class Assistant::Function::SearchFamilyFiles < Assistant::Function
       )
     end
 
-    mapped = results.map do |result|
+    mapped = drop_inaccessible(results).map do |result|
       { content: result[:content], filename: result[:filename], score: result[:score] }
     end
 
@@ -145,11 +145,54 @@ class Assistant::Function::SearchFamilyFiles < Assistant::Function
   end
 
   private
+    # The document store has no account dimension: family_documents carries no
+    # account_id column and Family#search_documents filters on nothing but
+    # vector_store_id, so every hit is family-wide by construction. That was
+    # tolerable while only /imports fed it. This branch added an
+    # after_create_commit that indexes EVERY vault upload, including statements
+    # on accounts a member cannot see, so the same family-wide search now
+    # reaches their contents.
+    #
+    # Scoped deliberately narrowly: only documents carrying account_id in their
+    # metadata, which is exactly the set this branch newly indexes. Older rows
+    # have no such key and keep their previous behaviour, so this closes what
+    # was opened without silently hiding documents users can see today. The
+    # proper fix is an account column on family_documents, which belongs
+    # upstream rather than in this fork.
+    def drop_inaccessible(results)
+      file_ids = results.filter_map { |result| result[:file_id] }.uniq
+      return results if file_ids.empty?
+
+      restricted = family.family_documents
+                         .where(provider_file_id: file_ids)
+                         .where.not("metadata->>'account_id' IS NULL")
+                         .pluck(:provider_file_id, Arel.sql("metadata->>'account_id'"))
+                         .to_h
+
+      return results if restricted.empty?
+
+      allowed = user.accessible_accounts.pluck(:id).map(&:to_s).to_set
+
+      results.reject do |result|
+        account_id = restricted[result[:file_id]]
+        account_id.present? && !allowed.include?(account_id)
+      end
+    end
+
     # Metadata-only search over the Statement Vault: filename, institution and
     # account hints. No document CONTENT, because extracting it is exactly what
     # needs the machinery that is missing here. get_document_text reads one
     # statement's text directly and is the right next call.
     def statement_fallback(query, max_results, reason:)
+      # The same gate every other vault tool opens with (GetDocumentText,
+      # ListAccountStatements, GetAccountStatement, UploadAccountStatement).
+      # Full-text search being unconfigured must not become a way around the
+      # role check: this tool is not preview-gated and no controller filters on
+      # role, so a guest reaches it, and the vault inventory, filenames and
+      # institution hints included, is not theirs to list. Unlinked statements
+      # in particular require statement_manager? per AccountStatement#viewable_by?.
+      return not_a_manager_result(query, reason) unless AccountStatement.statement_manager?(user)
+
       statements = matching_statements(query, max_results)
 
       {
@@ -160,6 +203,23 @@ class Assistant::Function::SearchFamilyFiles < Assistant::Function
         result_count: statements.size,
         results: statements.map { |statement| statement_result(statement) },
         message: fallback_message(reason, statements.size)
+      }
+    end
+
+    # Distinguished from an empty vault on purpose: "you may not list this" and
+    # "there is nothing here" are different answers, and collapsing them is the
+    # mistake this whole fallback exists to undo.
+    def not_a_manager_result(query, reason)
+      {
+        success: true,
+        search_mode: "metadata_only",
+        reason: reason,
+        query: query,
+        result_count: 0,
+        results: [],
+        message: "Full-text document search is not configured on this install, and listing the " \
+                 "statement vault requires an admin or member role. Say that the documents could " \
+                 "not be listed for this user, NOT that no document exists."
       }
     end
 
